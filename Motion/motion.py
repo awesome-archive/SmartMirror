@@ -5,13 +5,18 @@ import time
 from config import config
 from gesture import Gesture
 
+# Only used for in board raspberry pi camera
+if config['piCamera']['useCameraBoard']:
+    from picamera.array import PiRGBArray
+    from picamera import PiCamera
+
 class Motion(object):
     currentFrame = None
     previousFrame = None
 
     def __init__(self):
-        self.videoDevice = cv2.VideoCapture(0)
         self.mask_rafined = None
+        self.debugPalm = False
         self.movementRatio = 0
         self.timeLastMotion = time.time()
         self.previousGestureProperties = None
@@ -23,30 +28,56 @@ class Motion(object):
         self.currentGesture = None
         self.handPointHSV = None
 
+        if config['piCamera']['useCameraBoard']:
+            self.picamera = PiCamera()
+            self.picamera.resolution = config['piCamera']['resolution']
+            self.picamera.framerate = config['piCamera']['framerate']
+        else:
+            self.videoDevice = cv2.VideoCapture(0)
+
     def IsActive(self):
+        if config['piCamera']['useCameraBoard']:
+            return not self.picamera.closed
+
         return self.videoDevice.isOpened()
 
     def TimeElapsedSinceLastMotion(self):
         return time.time() - self.timeLastMotion
 
     def Dispose(self):
-        self.videoDevice.release()
+        if config['piCamera']['useCameraBoard']:
+            self.picamera.close()
+        else:
+            self.videoDevice.release()
+
         cv2.destroyAllWindows()
 
     def FoundMovement(self):
         return int(self.movementRatio) > config['frameDifferenceRatioForMovement']
 
+    # Manage raspberry pi camera or simple camera (see config['RaspberryPi'])
+    def GetFrameFromVideoDevice(self):
+        if not config['piCamera']['useCameraBoard']:
+            _, Motion.currentFrame = self.videoDevice.read()
+            return
+
+        # grab an image from the camera and convert it to an array
+        rawCapture = PiRGBArray(self.picamera)
+        self.picamera.capture(rawCapture, format="bgr")
+        Motion.currentFrame = rawCapture.array
+
+
     def GetInformationOnNextFrame(self):
         # Store previous frame
         Motion.previousFrame = Motion.currentFrame
-        
+
         # Capture frame-by-frame
-        ret, Motion.currentFrame = self.videoDevice.read()
-        if Motion.previousFrame == None:
+        self.GetFrameFromVideoDevice()
+        if Motion.previousFrame is None:
             return
 
         # Get frame difference to avoid doing things when there is no movement
-        self.frameDifference = cv2.absdiff(cv2.cvtColor(Motion.currentFrame, cv2.COLOR_RGB2GRAY), cv2.cvtColor(Motion .previousFrame, cv2.COLOR_BGR2GRAY))
+        self.frameDifference = cv2.absdiff(cv2.cvtColor(Motion.currentFrame, cv2.COLOR_RGB2GRAY), cv2.cvtColor(Motion .previousFrame, cv2.COLOR_RGB2GRAY))
         cntGray = 0
         for rowGray in self.frameDifference:
             for gray in rowGray:
@@ -60,12 +91,13 @@ class Motion(object):
         self.timeLastMotion = time.time()
 
     def TryToTrackHand(self):
-        lower_blue_brightness = 255
+        lower_blue_brightness = config['hand']['hsv_palm_max'][2]
         search_hand = Gesture()
+
         while lower_blue_brightness > 15:
             # define range of blue color in HSV
-            lower_blue = np.array([config['hand']['hsv_lower_blue'][0], config['hand']['hsv_lower_blue'][1], lower_blue_brightness])
-            upper_blue = np.array([config['hand']['hsv_upper_blue'][0], config['hand']['hsv_upper_blue'][1], 255])
+            lower_blue = np.array([config['hand']['hsv_palm_min'][0], config['hand']['hsv_palm_min'][1], lower_blue_brightness])
+            upper_blue = np.array([config['hand']['hsv_palm_max'][0], config['hand']['hsv_palm_max'][1], config['hand']['hsv_palm_max'][2]])
 
             kernel = np.ones((5, 5), np.float32) / 25
             blurred = cv2.filter2D(self.currentFrame.copy(), -1, kernel)
@@ -74,6 +106,11 @@ class Motion(object):
             # Threshold the HSV image to get only blue colors
             mask = cv2.inRange(hsv, lower_blue, upper_blue)
             self.mask_rafined = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+            # Debug Palm Detection
+            if self.debugPalm:
+                cv2.imshow('Mask from HSV Range', self.mask_rafined)
+                cv2.waitKey(5)
 
             search_hand_mask = self.mask_rafined.copy()
             foundPalm = search_hand.SearchPalmFromMask(search_hand_mask)
@@ -97,9 +134,9 @@ class Motion(object):
         hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
         self.hand_lower_blue = self.AddValueToColorArray(
-            [-config['hand']['hsv_dec_blue'][0], -config['hand']['hsv_dec_blue'][1], -config['hand']['hsv_dec_blue'][2]], self.handPointHSV.copy())
+            [-config['hand']['hsv_hand_dec'][0], -config['hand']['hsv_hand_dec'][1], -config['hand']['hsv_hand_dec'][2]], self.handPointHSV.copy())
         self.hand_upper_blue = self.AddValueToColorArray(
-            [config['hand']['hsv_inc_blue'][0], config['hand']['hsv_inc_blue'][1], config['hand']['hsv_inc_blue'][2]], self.handPointHSV.copy())
+            [config['hand']['hsv_hand_inc'][0], config['hand']['hsv_hand_inc'][1], config['hand']['hsv_hand_inc'][2]], self.handPointHSV.copy())
 
         mask = cv2.inRange(hsv, self.hand_lower_blue, self.hand_upper_blue)
         self.mask_rafined = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
